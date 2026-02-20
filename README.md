@@ -1,69 +1,97 @@
-## Versioning Registrar (Foundry)
+# Versioning Registrar
 
-This project implements the ENS-based versioning flow from your sequence diagram:
-- `cork.version.eth` for org namespace
-- `app.cork.version.eth` for app identity that resolves to a proxy
-- `1.app.cork.version.eth` + `latest.app.cork.version.eth` for implementation versions
+`VersioningRegistrar` is an ENS-based registry contract that manages software version naming under a root namespace (for example `version.eth`).
 
-## Dependencies
+It provides three layers of identity:
+- Org namespace: `cork.version.eth`
+- App namespace (points to proxy/app entry): `app.cork.version.eth`
+- Version namespace (points to implementation): `1.app.cork.version.eth`, `2.app.cork.version.eth`, and `latest.app.cork.version.eth`
 
-ENS core contracts are installed via Forge:
-```bash
-forge install ensdomains/ens-contracts --no-git
-forge install OpenZeppelin/openzeppelin-contracts@v4.9.6 --no-git
-```
+The registrar owns the subnodes it creates and writes address records through ENS resolver calls.
 
-Imports used in this repo:
-- `ens-contracts/registry/ENS.sol`
-- `ens-contracts/registry/ENSRegistry.sol`
-- `ens-contracts/resolvers/OwnedResolver.sol`
+## Protocol Flow (Step-by-Step)
 
-## Contracts
+Actors:
+- User: `Deployer` / org admin / app admin
+- `VersioningRegistrar`
+- ENS `ENSRegistry`
+- ENS resolver (`OwnedResolver` in this project)
 
-- `src/VersioningRegistrar.sol`
-  - Secure org/app/version registration with custom errors and strict access control.
-  - App registration requires proxy contract code to exist.
-  - Version publish requires implementation contract code to exist.
-  - Updates `latest` alias on each publish.
+### 0) Deployment and Root Setup
+1. Deployer deploys `ENSRegistry`.
+2. Deployer deploys resolver (`OwnedResolver`).
+3. Deployer registers `.eth` in ENS root:
+   - `ENSRegistry.setSubnodeRecord(root, keccak256("eth"), deployer, resolver, 0)`
+4. Deployer deploys `VersioningRegistrar(ens, resolver, namehash("version.eth"))`.
+5. Deployer transfers resolver ownership to registrar:
+   - `OwnedResolver.transferOwnership(registrar)`
+6. Deployer registers `version.eth` and assigns node ownership to registrar:
+   - `ENSRegistry.setSubnodeRecord(namehash("eth"), keccak256("version"), registrar, resolver, 0)`
 
-- `lib/ens-contracts/contracts/resolvers/OwnedResolver.sol`
-  - ENS resolver used for `setAddr` / `addr`.
-  - Resolver ownership is transferred to the registrar so the registrar can update records.
+### 1) Org Registration
+1. Deployer calls:
+   - `VersioningRegistrar.registerOrg("cork", admin)`
+2. Registrar validates label/admin and computes `orgNode`.
+3. Registrar creates ENS subnode for `cork.version.eth`:
+   - `ENSRegistry.setSubnodeRecord(versionNode, keccak256("cork"), registrar, resolver, 0)`
+4. Registrar stores admin in `orgAdmin[orgNode]`.
 
-## Forge Test Strategy
+### 2) App Registration
+1. Org admin calls:
+   - `VersioningRegistrar.registerApp("app", orgNode, proxy)`
+2. Registrar verifies caller is org admin and `proxy.code.length > 0`.
+3. Registrar creates ENS subnode for `app.cork.version.eth`:
+   - `ENSRegistry.setSubnodeRecord(orgNode, keccak256("app"), registrar, resolver, 0)`
+4. Registrar points app node to proxy:
+   - `resolver.setAddr(appNode, proxy)`
+5. Registrar stores app admin in `appAdmin[appNode]`.
 
-`forge test` does full E2E setup and validation:
-1. Deploy ENS core (`ENSRegistry`) and resolver.
-2. Register `.eth` from root.
-3. Deploy `VersioningRegistrar` with `rootNode = namehash("version.eth")`.
-4. Transfer resolver ownership to registrar.
-5. Register `version.eth` in ENS with owner = registrar.
-6. Run org/app/version lifecycle and negative security tests.
+### 3) Publish Version (v1)
+1. App admin calls:
+   - `VersioningRegistrar.publishVersion(appNode, implementation)`
+2. Registrar verifies caller is app admin and `implementation.code.length > 0`.
+3. Registrar increments `latestVersion[appNode]` from `0 -> 1`.
+4. Registrar creates version node `1.app.cork.version.eth`:
+   - `ENSRegistry.setSubnodeRecord(appNode, keccak256("1"), registrar, resolver, 0)`
+5. Registrar points version node to implementation:
+   - `resolver.setAddr(v1Node, implementation)`
+6. Registrar creates `latest.app.cork.version.eth` (first publish only) and points it:
+   - `ENSRegistry.setSubnodeRecord(appNode, keccak256("latest"), registrar, resolver, 0)`
+   - `resolver.setAddr(latestNode, implementation)`
 
-Run:
-```bash
+### 4) Publish Version (v2 and beyond)
+1. App admin calls `publishVersion` again.
+2. Registrar increments version (`1 -> 2`, etc).
+3. Registrar creates numeric version subnode (`2`, `3`, ...), points it to implementation.
+4. Registrar updates only `latest` address to newest implementation.
+
+## Run EndToEndVersioning.s.sol
+
+### Prerequisites
+```fish
+cd /Users/abhi/code/versioning-registrar-foundry
 forge build
-forge test -vvv
 ```
 
-## Local Anvil Deployment Flow
-
-1. Start local chain:
-```bash
-anvil
+### 1) Start local Anvil node (Terminal 1)
+```fish
+anvil --host 127.0.0.1 --port 8545
 ```
 
-2. Deploy ENS + resolver + registrar and register `.eth` + `version.eth`:
-```bash
-./script/deploy-local.sh
+### 2) Run the end-to-end script (Terminal 2)
+```fish
+cd /Users/abhi/code/versioning-registrar-foundry
+forge script script/EndToEndVersioning.s.sol:EndToEndVersioningScript --rpc-url http://127.0.0.1:8545 --broadcast -vv
 ```
 
-Optional environment overrides:
-```bash
-RPC_URL=http://127.0.0.1:8545 PRIVATE_KEY=<anvil_private_key> ./script/deploy-local.sh
-```
+The script will:
+- deploy ENS registry + resolver + registrar + sample app contract
+- run org registration, app registration, publish v1 and v2
+- verify forward resolution for v1 and latest
+- print deployed contract addresses in script logs
 
-3. Run tests against the running local chain snapshot:
-```bash
-forge test --fork-url http://127.0.0.1:8545 -vvv
+### Optional: use a different deployer private key
+```fish
+set -x PRIVATE_KEY 0xYOUR_PRIVATE_KEY
+forge script script/EndToEndVersioning.s.sol:EndToEndVersioningScript --rpc-url http://127.0.0.1:8545 --broadcast -vv
 ```
