@@ -1,0 +1,24 @@
+# Foundry build artifacts
+out/
+cache/
+broadcast/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Dependency lockfile (optional in library templates)
+# Remove this line if you want to track exact dependency revisions.
+lib/**/.git
+
+# Coverage and reports
+coverage/
+lcov.info
+
+# IDE / OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
